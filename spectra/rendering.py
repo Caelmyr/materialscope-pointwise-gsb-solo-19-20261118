@@ -218,3 +218,103 @@ def compare_preview(first, second, options):
     output = io.BytesIO()
     Image.fromarray(result).save(output, format='PNG')
     return output.getvalue()
+
+
+def _grayscale_band(cube, band):
+    values = cube.values[:, :, band].astype(float)
+    valid = cube.valid[:, :, band]
+    if not valid.any():
+        return np.zeros(cube.shape[:2], dtype=float), valid
+    low, high = percentile_limits(values, valid, 2, 98)
+    normalized = np.clip((values - low) / max(high - low, 1e-12), 0, 1)
+    return normalized, valid
+
+
+def registration_blend(cube, reference_band, moving_band, options, warp_maps=None):
+    """参考带与待配带叠看；warp_maps 给定（map_x,map_y）时叠加的是按当前审阅变形后的待配带。"""
+    from .numerics import bilinear_sample
+    reference_band = c.integer(reference_band, '参考波段', 0, cube.count - 1)
+    moving_band = c.integer(moving_band, '待配波段', 0, cube.count - 1)
+    mode = c.choice(options.get('mode', 'color'), '叠看模式', ['color', 'difference', 'grayscale'])
+    alpha = c.number(options.get('alpha', 0.5), '叠看透明度', 0.05, 0.95)
+    reference_gray, reference_valid = _grayscale_band(cube, reference_band)
+    if warp_maps is not None:
+        map_x, map_y = warp_maps
+        moving_values, moving_valid = bilinear_sample(
+            cube.values[:, :, moving_band], cube.valid[:, :, moving_band], map_x, map_y, strict=True,
+        )
+        low, high = percentile_limits(moving_values, moving_valid, 2, 98)
+        moving_gray = np.clip((moving_values - low) / max(high - low, 1e-12), 0, 1)
+    else:
+        moving_gray, moving_valid = _grayscale_band(cube, moving_band)
+    common = reference_valid & moving_valid
+    height, width = reference_gray.shape
+    if mode == 'difference':
+        diff = np.abs(reference_gray - moving_gray)
+        rgb = colormap(diff, 'heat')
+    elif mode == 'grayscale':
+        mixed = reference_gray * (1 - alpha) + moving_gray * alpha
+        rgb = np.repeat(mixed[:, :, None], 3, axis=2)
+    else:
+        red = moving_gray
+        green_blue = reference_gray
+        rgb = np.stack([red, green_blue, green_blue], axis=2)
+        rgb = np.clip(rgb, 0, 1)
+    rgb = np.round(rgb * 255).astype(np.uint8)
+    yy, xx = np.indices((height, width))
+    checker = np.where(((xx // 8 + yy // 8) % 2) == 0, 32, 45).astype(np.uint8)
+    rgb[~common] = checker[~common, None]
+    rgba = np.dstack([rgb, np.full((height, width), 255, dtype=np.uint8)])
+    image = Image.fromarray(rgba)
+    maximum = c.integer(options.get('maximum', 900), '预览边长', 64, 1600)
+    image.thumbnail((maximum, maximum), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format='PNG')
+    return output.getvalue(), {'common_valid_pixels': int(common.sum()), 'warped_preview': warp_maps is not None}
+
+
+def annotation_overlay(cube, session, options=None):
+    """在参考带灰度图上绘制对应点、候选与独立材料区域，供审阅与重开核对。"""
+    options = options or {}
+    band = c.integer(options.get('band', session['reference_band']), '绘制波段', 0, cube.count - 1)
+    gray, valid = _grayscale_band(cube, band)
+    rgb = np.repeat((gray * 255)[:, :, None], 3, axis=2).astype(np.uint8)
+    yy, xx = np.indices(cube.shape[:2])
+    checker = np.where(((xx // 8 + yy // 8) % 2) == 0, 32, 45).astype(np.uint8)
+    rgb[~valid] = checker[~valid, None]
+    image = Image.fromarray(rgb).convert('RGB')
+    draw = ImageDraw.Draw(image)
+    line_width = max(1, min(cube.width, cube.height) // 200)
+    for region in session.get('regions', []):
+        color = region['color']
+        shape = region['shape']
+        if region['kind'] == 'rectangle':
+            x0, y0, x1, y1 = shape
+            draw.rectangle([x0, y0, x1 - 1, y1 - 1], outline=color, width=line_width + 1)
+        elif region['kind'] == 'ellipse':
+            x0, y0, x1, y1 = shape
+            draw.ellipse([x0, y0, x1 - 1, y1 - 1], outline=color, width=line_width + 1)
+        else:
+            draw.line([tuple(point) for point in shape] + [tuple(shape[0])], fill=color, width=line_width + 1)
+    for point in session.get('points', []):
+        if point['band'] != band:
+            continue
+        rx, ry = point['reference']
+        mx, my = point['moving']
+        if point['status'] == 'confirmed':
+            color = '#f4b860'
+        else:
+            color = '#9aafff'
+        radius = 4
+        draw.ellipse([rx - radius, ry - radius, rx + radius, ry + radius], outline=color, width=line_width)
+        draw.line([rx, ry, mx, my], fill=color, width=1)
+        draw.ellipse([mx - radius, my - radius, mx + radius, my + radius], outline='#ff7d7d', width=line_width)
+        for candidate in point.get('candidates', []):
+            cx, cy = candidate['moving']
+            shade = '#ffd1d1' if candidate.get('ambiguous') else '#8fa5b7'
+            draw.rectangle([cx - 2, cy - 2, cx + 2, cy + 2], outline=shade)
+    maximum = c.integer(options.get('maximum', 1200), '预览边长', 64, 1600)
+    image.thumbnail((maximum, maximum), Image.Resampling.LANCZOS)
+    output = io.BytesIO()
+    image.save(output, format='PNG')
+    return output.getvalue()

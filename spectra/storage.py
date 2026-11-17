@@ -89,6 +89,7 @@ class Store:
                 'assets': [],
                 'regions': [],
                 'signatures': [],
+                'registration_sessions': [],
                 'notes': '',
                 'snapshots': [],
                 'history': [],
@@ -102,7 +103,7 @@ class Store:
             return copy.deepcopy(self._read(project_id))
 
     def _state(self, project):
-        return {key: copy.deepcopy(project[key]) for key in ('name', 'assets', 'regions', 'signatures', 'notes')}
+        return {key: copy.deepcopy(project[key]) for key in ('name', 'assets', 'regions', 'signatures', 'registration_sessions', 'notes')}
 
     @contextmanager
     def transaction(self, project_id, expected_revision, action):
@@ -226,6 +227,10 @@ class Store:
         with self.transaction(project_id, expected_revision, '移除叶影像') as project:
             if any(row.get('parent_id') == asset_id for row in project['assets']):
                 raise c.Invalid('该影像仍有派生结果，请先移除派生结果')
+            if any(row.get('asset_id') == asset_id for row in project.get('registration_sessions', [])):
+                raise c.Invalid('该影像存在局部配准审阅，请先删除相关审阅')
+            if any(row.get('result_asset_id') == asset_id for row in project.get('registration_sessions', [])):
+                raise c.Invalid('该影像是冻结局部配准审阅的交付结果，审阅依据需保持完整，不能删除')
             if not any(row['id'] == asset_id for row in project['assets']):
                 raise c.Invalid('影像不存在')
             project['assets'] = [row for row in project['assets'] if row['id'] != asset_id]

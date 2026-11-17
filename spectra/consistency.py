@@ -115,6 +115,66 @@ def validate_signature(row):
     return row
 
 
+def validate_registration_session(row, assets):
+    c.identifier(row.get('id'), '局部配准审阅标识')
+    c.text(row.get('name'), '局部配准审阅名称')
+    asset_id = c.identifier(row.get('asset_id'), '审阅源影像')
+    if asset_id not in assets:
+        raise c.Invalid('局部配准审阅引用不存在的影像')
+    summary = assets[asset_id]['summary']
+    width, height, band_count = summary['width'], summary['height'], summary['band_count']
+    c.choice(row.get('status'), '审阅状态', ['open', 'frozen'])
+    c.integer(row.get('reference_band'), '参考波段', 0, band_count - 1)
+    c.number(row.get('max_displacement'), '最大局部位移', 0.5, max(width, height))
+    c.choice(row.get('unconstrained_policy'), '无约束位置处理', ['mask', 'passthrough'])
+    c.text(row.get('created_at'), '审阅创建时间', 64)
+    c.text(row.get('updated_at'), '审阅更新时间', 64)
+    points = unique_rows(row.get('points'), '配准对应点', 400)
+    seen_pairs = set()
+    for point in points:
+        band = c.integer(point.get('band'), '对应点波段', 0, band_count - 1)
+        c.choice(point.get('status'), '对应点状态', ['confirmed', 'pending'])
+        for key in ('reference', 'moving'):
+            pair = c.array_value(point.get(key), key + '坐标', 2, 2)
+            c.number(pair[0], key + '横坐标', -0.5, width - 0.5)
+            c.number(pair[1], key + '纵坐标', -0.5, height - 0.5)
+        c.text(point.get('note', ''), '对应点说明', 200, True)
+        pair_key = (band, round(float(point['reference'][0]), 3), round(float(point['reference'][1]), 3))
+        if pair_key in seen_pairs:
+            raise c.Invalid('同一波段同一参考位置存在重复对应点')
+        seen_pairs.add(pair_key)
+        for candidate in c.array_value(point.get('candidates', []), '候选位置', 0, 12):
+            c.object_value(candidate, '候选位置')
+            pair = c.array_value(candidate.get('moving'), '候选坐标', 2, 2)
+            c.number(pair[0], '候选横坐标', -0.5, width - 0.5)
+            c.number(pair[1], '候选纵坐标', -0.5, height - 0.5)
+            c.number(candidate.get('score'), '候选相关分', -1, 1)
+    regions = unique_rows(row.get('regions'), '配准材料区域', 20)
+    for region in regions:
+        c.text(region.get('name'), '配准区域名称')
+        kind = c.choice(region.get('kind'), '配准区域形状', ['rectangle', 'ellipse', 'polygon'])
+        c.color(region.get('color'))
+        if kind == 'polygon':
+            vertices = c.array_value(region.get('shape'), '区域顶点', 3, 200)
+            for pair in vertices:
+                c.number(pair[0], '顶点横坐标', -0.5, width - 0.5)
+                c.number(pair[1], '顶点纵坐标', -0.5, height - 0.5)
+        else:
+            bounds = c.array_value(region.get('shape'), '区域边界', 4, 4)
+            c.bounds(bounds, width, height)
+    result_id = row.get('result_asset_id')
+    if result_id is not None:
+        c.identifier(result_id, '配准结果影像')
+        if result_id not in assets:
+            raise c.Invalid('局部配准结果影像不存在')
+        if row.get('status') != 'frozen':
+            raise c.Invalid('存在结果影像的审阅必须是冻结状态')
+    if row.get('status') == 'frozen' and not result_id:
+        raise c.Invalid('冻结审阅缺少结果影像')
+    bounded_json(row.get('warp_report', {}), '局部变形报告', 2000000)
+    return row
+
+
 def validate_state(state):
     state = c.object_value(state, '工程状态')
     c.text(state.get('name'), '工程名称')
@@ -129,6 +189,9 @@ def validate_state(state):
     signatures = unique_rows(state.get('signatures'), '材料参考', c.LIMITS['signatures'])
     for row in signatures:
         validate_signature(row)
+    sessions = unique_rows(state.get('registration_sessions', []), '局部配准审阅', c.LIMITS['registration_sessions'])
+    for row in sessions:
+        validate_registration_session(row, lookup)
     return state
 
 

@@ -3,6 +3,7 @@ import json
 import os
 import traceback
 
+import numpy as np
 from flask import Flask, jsonify, request, send_file, render_template
 from werkzeug.exceptions import HTTPException
 
@@ -13,7 +14,7 @@ from .engine import operation_catalog
 from .io import cube_bytes, band_tiff, mask_png, csv_bytes, spectrum_csv, result_bundle
 from .jobs import JobManager
 from .preflight import preflight_operation, recipe_preflight
-from .rendering import PreviewCache, render_png, default_view, overlay_regions, band_contact_sheet, compare_preview
+from .rendering import PreviewCache, render_png, default_view, overlay_regions, band_contact_sheet, compare_preview, registration_blend, annotation_overlay
 from .services import Services
 from .storage import Store
 from .views import ViewPresets
@@ -491,5 +492,114 @@ def create_app(data_dir):
         store.get(project_id)
         data = payload()
         return response(views.import_presets(project_id, data.get('view_revision'), data.get('presets')))
+
+    # ------------------------------------------------------------------
+    # 可审阅局部波段配准
+    # ------------------------------------------------------------------
+    def session_cube(project_id, session_id):
+        project = store.get(project_id)
+        session = next((row for row in project.get('registration_sessions', []) if row['id'] == session_id), None)
+        if session is None:
+            raise c.Invalid('局部配准审阅不存在')
+        _, _, cube = store.asset(project_id, session['asset_id'])
+        return session, cube
+
+    @app.get('/api/projects/<project_id>/registration')
+    def registration_sessions(project_id):
+        return response(service.list_registration_sessions(project_id))
+
+    @app.post('/api/projects/<project_id>/assets/<asset_id>/registration')
+    def create_registration(project_id, asset_id):
+        data = payload()
+        return response(service.create_registration_session(project_id, asset_id, data.get('revision'), data))
+
+    @app.get('/api/projects/<project_id>/registration/<session_id>')
+    def registration_detail(project_id, session_id):
+        return response(service.registration_session_detail(project_id, session_id))
+
+    @app.patch('/api/projects/<project_id>/registration/<session_id>')
+    def update_registration(project_id, session_id):
+        data = payload()
+        return response(service.update_registration_session(project_id, session_id, data.get('revision'), data))
+
+    @app.delete('/api/projects/<project_id>/registration/<session_id>')
+    def delete_registration(project_id, session_id):
+        data = payload()
+        return response(service.delete_registration_session(project_id, session_id, data.get('revision')))
+
+    @app.post('/api/projects/<project_id>/registration/<session_id>/clone')
+    def clone_registration(project_id, session_id):
+        data = payload()
+        return response(service.clone_registration_session(project_id, session_id, data.get('revision')))
+
+    @app.get('/api/projects/<project_id>/registration/<session_id>/conflicts')
+    def registration_conflicts(project_id, session_id):
+        return response(service.registration_conflicts(project_id, session_id))
+
+    @app.post('/api/projects/<project_id>/registration/<session_id>/points')
+    def add_registration_point(project_id, session_id):
+        data = payload()
+        return response(service.add_registration_point(project_id, session_id, data.get('revision'), data))
+
+    @app.patch('/api/projects/<project_id>/registration/<session_id>/points/<point_id>')
+    def update_registration_point(project_id, session_id, point_id):
+        data = payload()
+        return response(service.update_registration_point(project_id, session_id, point_id, data.get('revision'), data))
+
+    @app.delete('/api/projects/<project_id>/registration/<session_id>/points/<point_id>')
+    def remove_registration_point(project_id, session_id, point_id):
+        data = payload()
+        return response(service.remove_registration_point(project_id, session_id, point_id, data.get('revision')))
+
+    @app.post('/api/projects/<project_id>/registration/<session_id>/regions')
+    def add_registration_region(project_id, session_id):
+        data = payload()
+        return response(service.add_registration_region(project_id, session_id, data.get('revision'), data))
+
+    @app.delete('/api/projects/<project_id>/registration/<session_id>/regions/<region_id>')
+    def remove_registration_region(project_id, session_id, region_id):
+        data = payload()
+        return response(service.remove_registration_region(project_id, session_id, region_id, data.get('revision')))
+
+    @app.post('/api/projects/<project_id>/registration/<session_id>/candidates')
+    def registration_candidates(project_id, session_id):
+        data = payload()
+        return response(service.registration_candidates(project_id, session_id, data))
+
+    @app.post('/api/projects/<project_id>/registration/<session_id>/freeze')
+    def freeze_registration(project_id, session_id):
+        data = payload()
+        return response(service.freeze_registration_session(project_id, session_id, data.get('revision'), data))
+
+    @app.get('/api/projects/<project_id>/registration/<session_id>/blend.png')
+    def registration_blend_png(project_id, session_id):
+        session, cube = session_cube(project_id, session_id)
+        moving_band = c.integer(request.args.get('band', 0), '待配波段', 0, cube.count - 1)
+        use_warp = request.args.get('warped', '0') == '1' and session['status'] == 'open'
+        warp_maps = None
+        if use_warp:
+            from . import localwarp
+            analysis = localwarp.detect_conflicts(session, cube)
+            if not analysis['blocking']:
+                fields = localwarp.build_warp_fields(cube, analysis)
+                field = fields.get(moving_band)
+                if field is not None:
+                    safe_x = np.where(field['supported'], field['map_x'], 0.0)
+                    safe_y = np.where(field['supported'], field['map_y'], 0.0)
+                    warp_maps = (safe_x, safe_y)
+        data, _ = registration_blend(
+            cube, session['reference_band'], moving_band,
+            {'mode': request.args.get('mode', 'color'), 'alpha': request.args.get('alpha', 0.5),
+             'maximum': request.args.get('maximum', 1000)},
+            warp_maps,
+        )
+        return send_file(io.BytesIO(data), mimetype='image/png')
+
+    @app.get('/api/projects/<project_id>/registration/<session_id>/annotations.png')
+    def registration_annotations_png(project_id, session_id):
+        session, cube = session_cube(project_id, session_id)
+        data = annotation_overlay(cube, session, {'band': request.args.get('band', session['reference_band']),
+                                                  'maximum': request.args.get('maximum', 1200)})
+        return send_file(io.BytesIO(data), mimetype='image/png')
 
     return app

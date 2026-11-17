@@ -61,13 +61,42 @@ def create_demo(width=192, height=144, bands=12, seed=71):
     shifted = reflectance.copy()
     shifted_valid = valid.copy()
     shifts = []
+    local_warps = []
+    warp_yy, warp_xx = np.indices((height, width), dtype=float)
     for index in range(bands):
         dx = float(np.sin(index * 0.8) * 2.5)
         dy = float(np.cos(index * 0.6) * 1.8)
-        shifted[:, :, index] = ndimage.shift(reflectance[:, :, index], (dy, dx), order=1, mode='constant', cval=0)
-        shifted_valid[:, :, index] = ndimage.shift(valid[:, :, index].astype(float), (dy, dx), order=1, mode='constant', cval=0) >= 0.99999
+        # 局部位移场：随空间位置变化的拉伸/压缩，长波更明显；参考带本身为零
+        stretch_scale = (index - (bands - 1) / 2) / max(bands - 1, 1)
+        local_dx = stretch_scale * 2.2 * np.sin(warp_yy / max(height, 1) * np.pi)
+        local_dy = stretch_scale * 1.4 * np.sin(warp_xx / max(width, 1) * np.pi)
+        local_warps.append({'band_index': index, 'scale': round(stretch_scale, 4),
+                            'max_local_dx': round(float(np.max(np.abs(local_dx))), 4),
+                            'max_local_dy': round(float(np.max(np.abs(local_dy))), 4)})
+        sample_x = warp_xx - dx - local_dx
+        sample_y = warp_yy - dy - local_dy
+        inside = (sample_x >= 0) & (sample_x <= width - 1) & (sample_y >= 0) & (sample_y <= height - 1)
+        x0 = np.clip(np.floor(sample_x).astype(int), 0, width - 2)
+        y0 = np.clip(np.floor(sample_y).astype(int), 0, height - 2)
+        fx = np.clip(sample_x - x0, 0, 1)
+        fy = np.clip(sample_y - y0, 0, 1)
+        x1 = x0 + 1
+        y1 = y0 + 1
+        source = reflectance[:, :, index]
+        warped = (source[y0, x0] * (1 - fx) * (1 - fy) + source[y0, x1] * fx * (1 - fy)
+                  + source[y1, x0] * (1 - fx) * fy + source[y1, x1] * fx * fy)
+        source_valid = valid[:, :, index].astype(float)
+        warped_valid = (source_valid[y0, x0] * (1 - fx) * (1 - fy) + source_valid[y0, x1] * fx * (1 - fy)
+                        + source_valid[y1, x0] * (1 - fx) * fy + source_valid[y1, x1] * fx * fy)
+        shifted[:, :, index] = np.where(inside, warped, 0)
+        shifted_valid[:, :, index] = inside & (warped_valid >= 0.99999)
         shifts.append([dx, dy])
-    cubes['misregistered'] = create_cube(shifted, shifted_valid, band_rows, 'reflectance', 'fraction', grid, {**metadata, 'role': 'shifted_bands', 'synthetic_applied_shifts': shifts})
+    cubes['misregistered'] = create_cube(
+        shifted, shifted_valid, band_rows, 'reflectance', 'fraction', grid,
+        {**metadata, 'role': 'shifted_bands', 'synthetic_applied_shifts': shifts,
+         'synthetic_local_warps': local_warps,
+         'synthetic_note': '每带含整体平移与随空间变化的局部拉伸，用于演示可审阅局部配准'},
+    )
     names = ['Polymer reference', 'Fiber reference', 'Coating reference']
     signatures = []
     for index, name in enumerate(names):
@@ -104,7 +133,7 @@ def demo_description():
             '选择原始试片，指定暗场和白板进行反射率标定',
             '选择反射率试片，查看分区光谱和材料谱库匹配',
             '对反射率试片做主成分、聚类与异常图，再分割异常对象',
-            '选择错位波段影像，执行平移配准并查看逐带报告',
+            '对错位波段影像执行全局平移配准，或在局部配准审阅中确认对应点、圈定独立材料区域后重算局部变形',
             '导出工程，重启后重新打开或导入工程副本',
         ],
         'limitations': ['材料曲线是合成函数，不代表真实材料数据库', '标定示例未包含真实传感器非线性', '不存在自动深度或真实化学成分解释'],
