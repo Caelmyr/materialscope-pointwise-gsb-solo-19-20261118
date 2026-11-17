@@ -7,6 +7,16 @@ from . import contracts as c
 from .numerics import descriptive, histogram, deterministic_indices
 
 
+def validate_training_label(value):
+    if value is None:
+        return None
+    value = c.object_value(value, '训练标记')
+    role = c.choice(value.get('role'), '标记角色', ['class', 'negative'])
+    if role == 'negative':
+        return {'role': 'negative'}
+    return {'role': 'class', 'name': c.text(value.get('name'), '材料名称', 60)}
+
+
 def region_mask(cube, region):
     kind = c.choice(region.get('kind', 'rectangle'), '区域形状', ['rectangle', 'ellipse'])
     x0, y0, x1, y1 = c.bounds(region['bounds'], cube.width, cube.height)
@@ -32,6 +42,9 @@ def validate_region(cube, asset_id, options):
         'color': c.color(options.get('color', '#f4b860')),
         'created_at': c.timestamp(),
     }
+    training = validate_training_label(options.get('training'))
+    if training is not None:
+        result['training'] = training
     if not region_mask(cube, result).any():
         raise c.Invalid('分区没有覆盖任何像素中心')
     return result

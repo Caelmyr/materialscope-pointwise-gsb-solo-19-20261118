@@ -1,5 +1,5 @@
 from . import contracts as c
-from . import calibration, registration, spectral, multivariate, segmentation, spatial, library, scanlines
+from . import calibration, registration, spectral, multivariate, segmentation, spatial, library, scanlines, classifier
 
 
 OPERATIONS = {
@@ -26,6 +26,7 @@ OPERATIONS = {
     'cluster': ('材料光谱聚类', '材料分析', multivariate.cluster_materials, {'clusters': 4, 'iterations': 50, 'standardize': True}),
     'anomaly': ('全局光谱异常', '材料分析', multivariate.anomaly_detection, {'regularization': 0.001, 'flag_percentile': 99}),
     'match_library': ('材料参考谱搜索', '材料分析', library.match_library, {'method': 'angle', 'maximum_score': 0.2, 'minimum_margin': 0.01}),
+    'apply_classifier': ('保存分类器材料判定', '材料分析', classifier.apply_classifier, {'wavelength_tolerance_nm': 1.0}),
     'segment_objects': ('阈值对象分割', '对象与纹理', segmentation.segment_objects, {'band': 0, 'method': 'otsu', 'minimum_pixels': 10, 'connectivity': 8}),
     'label_filter': ('对象面积与边界筛选', '对象与纹理', segmentation.label_filter, {'minimum_pixels': 20, 'exclude_border': False}),
     'label_distance': ('到标签的物理距离', '对象与纹理', segmentation.label_distance, {'labels': [1]}),

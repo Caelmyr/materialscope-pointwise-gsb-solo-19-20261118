@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from . import contracts as c
-from . import diagnostics, library, regions
+from . import classifier, diagnostics, library, regions
 from .demo import create_demo
 from .engine import run_operation, OPERATIONS
 from .io import import_cube, read_signature_csv
@@ -92,6 +92,14 @@ class Services:
                 if any(identifier not in lookup for identifier in selected):
                     raise c.Invalid('材料参考不存在')
                 references['signatures'] = [lookup[identifier] for identifier in selected]
+        if operation == 'apply_classifier':
+            identifier = c.identifier(options.get('classifier_id'), '分类器')
+            row = next((item for item in project.get('classifiers', []) if item['id'] == identifier), None)
+            if row is None:
+                raise c.Invalid('分类器不存在')
+            if row.get('orientation') == 'pending':
+                raise c.Invalid('分类器误判取向未决：请先查看两种取向的整块留出验证并选择一种')
+            references['classifier'] = copy.deepcopy(row)
         return references
 
     def execute(self, project_id, asset_id, expected_revision, operation, options, name=None):
@@ -110,6 +118,8 @@ class Services:
         report['reference_fingerprints'] = reference_digests
         if references.get('signatures'):
             report['signature_snapshot'] = copy.deepcopy(references['signatures'])
+        if references.get('classifier'):
+            report['classifier_snapshot'] = copy.deepcopy(references['classifier'])
         title = c.text(name or (asset['name'] + ' · ' + OPERATIONS[operation][0]), '结果名称')
         updated, row = self.store.append_cube(project_id, expected_revision, output, title, asset_id, operation, parameters, report)
         return {'project': self.project_summary(project_id), 'asset': row}
@@ -282,6 +292,48 @@ class Services:
         with self.store.transaction(project_id, expected_revision, '应用原子处理配方') as current_project:
             current_project['assets'].extend(prepared)
         return {'project': self.project_summary(project_id), 'assets': prepared, 'asset': prepared[-1]}
+
+    def train_classifier(self, project_id, asset_id, expected_revision, name, options):
+        project, asset, cube = self.store.asset(project_id, asset_id)
+        labeled = [row for row in project['regions'] if row['asset_id'] == asset_id and row.get('training')]
+        row = classifier.train_classifier(cube, asset_id, asset['name'], labeled, name, options or {})
+        with self.store.transaction(project_id, expected_revision, '训练材料分类器') as current:
+            current['classifiers'].append(row)
+        return {'project': self.project_summary(project_id), 'classifier': row}
+
+    def get_classifier(self, project_id, classifier_id):
+        project = self.store.get(project_id)
+        row = next((item for item in project.get('classifiers', []) if item['id'] == classifier_id), None)
+        if row is None:
+            raise c.Invalid('分类器不存在')
+        return row
+
+    def set_classifier_orientation(self, project_id, classifier_id, expected_revision, orientation):
+        project = self.store.get(project_id)
+        row = next((item for item in project.get('classifiers', []) if item['id'] == classifier_id), None)
+        if row is None:
+            raise c.Invalid('分类器不存在')
+        updated = classifier.choose_orientation(row, orientation)
+        with self.store.transaction(project_id, expected_revision, '选择分类器误判取向') as current:
+            current['classifiers'] = [updated if item['id'] == classifier_id else item for item in current['classifiers']]
+        return {'project': self.project_summary(project_id), 'classifier': updated}
+
+    def delete_classifier(self, project_id, classifier_id, expected_revision):
+        with self.store.transaction(project_id, expected_revision, '移除材料分类器') as project:
+            if not any(row['id'] == classifier_id for row in project.get('classifiers', [])):
+                raise c.Invalid('分类器不存在')
+            project['classifiers'] = [row for row in project['classifiers'] if row['id'] != classifier_id]
+        return self.project_summary(project_id)
+
+    def classifier_explain(self, project_id, classifier_id, asset_id, x, y):
+        project = self.store.get(project_id)
+        row = next((item for item in project.get('classifiers', []) if item['id'] == classifier_id), None)
+        if row is None:
+            raise c.Invalid('分类器不存在')
+        _, asset, cube = self.store.asset(project_id, asset_id)
+        if asset['operation'] == 'apply_classifier' and asset.get('parent_id'):
+            _, _, cube = self.store.asset(project_id, asset['parent_id'])
+        return classifier.explain_pixel(cube, row, x, y)
 
     def project_health(self, project_id):
         project = self.store.get(project_id)

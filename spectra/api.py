@@ -358,6 +358,35 @@ def create_app(data_dir):
         data = payload()
         return response(service.compare_signatures(project_id, data.get('signature_ids')))
 
+    @app.post('/api/projects/<project_id>/classifiers')
+    def train_classifier(project_id):
+        data = payload()
+        return response(service.train_classifier(project_id, data.get('asset_id'), data.get('revision'), data.get('name'), data.get('options', {})))
+
+    @app.get('/api/projects/<project_id>/classifiers/<classifier_id>')
+    def classifier_detail(project_id, classifier_id):
+        return response({'classifier': service.get_classifier(project_id, classifier_id)})
+
+    @app.post('/api/projects/<project_id>/classifiers/<classifier_id>/orientation')
+    def classifier_orientation(project_id, classifier_id):
+        data = payload()
+        return response(service.set_classifier_orientation(project_id, classifier_id, data.get('revision'), data.get('orientation')))
+
+    @app.delete('/api/projects/<project_id>/classifiers/<classifier_id>')
+    def remove_classifier(project_id, classifier_id):
+        data = payload()
+        return response({'project': service.delete_classifier(project_id, classifier_id, data.get('revision'))})
+
+    @app.get('/api/projects/<project_id>/classifiers/<classifier_id>/export')
+    def export_classifier(project_id, classifier_id):
+        row = service.get_classifier(project_id, classifier_id)
+        payload_bytes = json.dumps({'schema': 'materialscope_classifier_v1', 'classifier': row}, ensure_ascii=False, indent=2).encode()
+        return binary(payload_bytes, 'material-classifier.json', 'application/json')
+
+    @app.get('/api/projects/<project_id>/classifiers/<classifier_id>/explain')
+    def classifier_explain(project_id, classifier_id):
+        return response(service.classifier_explain(project_id, classifier_id, request.args.get('asset_id'), request.args.get('x', 0), request.args.get('y', 0)))
+
     @app.get('/api/projects/<project_id>/signatures.csv')
     def signatures_csv(project_id):
         return binary(csv_bytes(reports.signature_table(store.get(project_id)['signatures'])), 'material-library.csv', 'text/csv')

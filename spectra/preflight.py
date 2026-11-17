@@ -57,6 +57,27 @@ def preflight_operation(cube, operation, options, project):
             issues.append('工程材料谱库为空')
         warnings.append('所有候选共用相同光谱覆盖，标签0表示未匹配')
         output_count = 1
+    if operation == 'apply_classifier':
+        requirements.append('fraction反射率域及已定误判取向的保存分类器')
+        if cube.domain != 'reflectance' or cube.unit != 'fraction':
+            issues.append('输入不是fraction反射率')
+        row = next((item for item in project.get('classifiers', []) if item['id'] == options.get('classifier_id')), None)
+        if row is None:
+            issues.append('分类器不存在或未在参数中选择')
+        else:
+            if row.get('orientation') == 'pending':
+                issues.append('分类器误判取向未决，验证充分后先选择取向')
+            waves = row['wavelengths_nm']
+            cube_waves = cube.wavelengths(required=False)
+            finite = np.isfinite(cube_waves)
+            matched = [wave for wave in waves if finite.any() and np.abs(cube_waves[finite] - wave).min() <= 1.0]
+            if len(matched) < row['model']['min_bands']:
+                issues.append(f'可匹配波长不足（{len(matched)}/{row["model"]["min_bands"]}）')
+            missing_keys = [wave for index, wave in enumerate(waves) if index in set(row['model']['key_bands']) and not any(abs(wave - item) <= 1e-6 for item in matched)]
+            if missing_keys:
+                warnings.append('关键区分波段整图缺失：' + '、'.join(f'{wave:g}nm' for wave in missing_keys) + '，歧义像素将留为证据不足')
+            warnings.append('缺测波段按观测子集边缘化，不补零；未知与证据不足分开标记')
+        output_count = 3
     if operation in ('continuum_remove', 'continuum_features'):
         if cube.count < 3:
             issues.append('至少需要3个物理波长')

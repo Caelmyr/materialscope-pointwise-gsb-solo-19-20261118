@@ -87,6 +87,60 @@ def validate_region(row, assets):
     c.bounds(row.get('bounds'), summary['width'], summary['height'])
     c.color(row.get('color'))
     c.text(row.get('created_at'), '分区创建时间', 64)
+    training = row.get('training')
+    if training is not None:
+        training = c.object_value(training, '训练标记')
+        role = c.choice(training.get('role'), '标记角色', ['class', 'negative'])
+        if role == 'class':
+            c.text(training.get('name'), '材料名称', 60)
+    return row
+
+
+def validate_classifier(row):
+    c.identifier(row.get('id'), '分类器标识')
+    c.text(row.get('name'), '分类器名称')
+    c.text(row.get('created_at'), '分类器创建时间', 64)
+    c.identifier(row.get('source_asset_id'), '分类器来源影像')
+    fingerprint = c.text(row.get('source_fingerprint'), '分类器来源摘要', 64)
+    if len(fingerprint) != 64 or any(char not in '0123456789abcdef' for char in fingerprint):
+        raise c.Invalid('分类器来源摘要不合法')
+    c.choice(row.get('orientation'), '误判取向', ['pending', 'foreign_sensitive', 'known_conservative'])
+    waves = c.finite_array(row.get('wavelengths_nm'), '分类器波长', 1, 64)
+    if len(waves) < 3 or np.any(np.diff(waves) <= 0):
+        raise c.Invalid('分类器波长需至少3个且严格递增')
+    classes = c.array_value(row.get('classes'), '材料类', 1, 32)
+    names = set()
+    for item in classes:
+        c.identifier(item.get('id'), '材料类标识')
+        name = c.text(item.get('name'), '材料类名称', 60)
+        if name in names:
+            raise c.Invalid('材料类名称重复')
+        names.add(name)
+        c.integer(item.get('pixels'), '材料类像素', 0, c.LIMITS['samples'])
+        c.array_value(item.get('region_ids'), '材料类区域', 1, c.LIMITS['regions'])
+    negative = c.object_value(row.get('negative'), '反例统计')
+    c.integer(negative.get('pixels'), '反例像素', 0, c.LIMITS['samples'])
+    model = c.object_value(row.get('model'), '分类模型')
+    centers = c.finite_array(model.get('centers'), '类中心', 2, 100000)
+    if centers.shape != (len(classes), len(waves)):
+        raise c.Invalid('类中心形状与类别、波长不一致')
+    covariance = c.finite_array(model.get('covariance'), '类内协方差', 2, 100000)
+    if covariance.shape != (len(waves), len(waves)):
+        raise c.Invalid('类内协方差形状与波长不一致')
+    key_bands = c.array_value(model.get('key_bands'), '关键波段', 0, len(waves))
+    for band in key_bands:
+        c.integer(band, '关键波段', 0, len(waves) - 1)
+    c.integer(model.get('min_bands'), '最少有效波段', 1, len(waves))
+    regions = c.array_value(row.get('training_regions'), '训练区域快照', 1, c.LIMITS['regions'])
+    for item in regions:
+        c.identifier(item.get('id'), '训练区域标识')
+        c.text(item.get('name'), '训练区域名称')
+        c.choice(item.get('kind'), '训练区域形状', ['rectangle', 'ellipse'])
+        c.array_value(item.get('bounds'), '训练区域边界', 4, 4)
+        c.choice(item.get('role'), '训练区域角色', ['class', 'negative'])
+    validation = c.object_value(row.get('validation'), '分类器验证')
+    c.boolean(validation.get('sufficient'), '验证充分性')
+    bounded_json(row, '分类器', 1500000)
     return row
 
 
@@ -129,6 +183,9 @@ def validate_state(state):
     signatures = unique_rows(state.get('signatures'), '材料参考', c.LIMITS['signatures'])
     for row in signatures:
         validate_signature(row)
+    classifiers = unique_rows(state.get('classifiers') or [], '分类器', c.LIMITS['classifiers'])
+    for row in classifiers:
+        validate_classifier(row)
     return state
 
 
@@ -159,9 +216,9 @@ def compare_states(before, after):
     before = validate_state(before)
     after = validate_state(after)
     result = {'name_changed': before['name'] != after['name'], 'notes_changed': before['notes'] != after['notes']}
-    for key in ('assets', 'regions', 'signatures'):
-        left = {row['id']: row for row in before[key]}
-        right = {row['id']: row for row in after[key]}
+    for key in ('assets', 'regions', 'signatures', 'classifiers'):
+        left = {row['id']: row for row in before.get(key) or []}
+        right = {row['id']: row for row in after.get(key) or []}
         common = set(left) & set(right)
         result[key] = {
             'added': sorted(set(right) - set(left)),
@@ -201,4 +258,18 @@ def project_dependencies(project):
             'can_remove_leaf': not children[identifier],
             'snapshot_references': [snapshot['id'] for snapshot in project['snapshots'] if any(row['id'] == identifier for row in snapshot['state']['assets'])],
         })
-    return {'assets': output, 'material_reference_policy': 'references are immutable measured spectra; removing a region does not delete its saved measurement'}
+    return {
+        'assets': output,
+        'classifiers': [
+            {
+                'id': row['id'],
+                'name': row['name'],
+                'source_asset_id': row['source_asset_id'],
+                'orientation': row['orientation'],
+                'class_count': len(row['classes']),
+            }
+            for row in project.get('classifiers', [])
+        ],
+        'material_reference_policy': 'references are immutable measured spectra; removing a region does not delete its saved measurement',
+        'classifier_policy': 'classifiers freeze training regions, labels, wavelengths, validation split and chosen orientation; later region or library edits never alter saved classifiers or their results',
+    }

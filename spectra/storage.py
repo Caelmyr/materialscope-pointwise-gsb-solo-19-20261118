@@ -52,7 +52,9 @@ class Store:
         if not path.exists():
             raise c.Invalid('工程不存在')
         try:
-            return json.loads(path.read_text())
+            project = json.loads(path.read_text())
+            project.setdefault('classifiers', [])
+            return project
         except (OSError, json.JSONDecodeError):
             raise c.Invalid('工程数据不可读取') from None
 
@@ -89,6 +91,7 @@ class Store:
                 'assets': [],
                 'regions': [],
                 'signatures': [],
+                'classifiers': [],
                 'notes': '',
                 'snapshots': [],
                 'history': [],
@@ -102,7 +105,9 @@ class Store:
             return copy.deepcopy(self._read(project_id))
 
     def _state(self, project):
-        return {key: copy.deepcopy(project[key]) for key in ('name', 'assets', 'regions', 'signatures', 'notes')}
+        state = {key: copy.deepcopy(project[key]) for key in ('name', 'assets', 'regions', 'signatures', 'notes')}
+        state['classifiers'] = copy.deepcopy(project.get('classifiers', []))
+        return state
 
     @contextmanager
     def transaction(self, project_id, expected_revision, action):
@@ -122,8 +127,8 @@ class Store:
 
     def validate_project(self, project):
         validate_project_structure(project)
-        for key, maximum in [('assets', c.LIMITS['assets']), ('regions', c.LIMITS['regions']), ('signatures', c.LIMITS['signatures'])]:
-            rows = c.array_value(project.get(key), key, 0, maximum)
+        for key, maximum in [('assets', c.LIMITS['assets']), ('regions', c.LIMITS['regions']), ('signatures', c.LIMITS['signatures']), ('classifiers', c.LIMITS['classifiers'])]:
+            rows = c.array_value(project.get(key) or [], key, 0, maximum)
             ids = [c.identifier(row.get('id'), key + '标识') for row in rows]
             if len(set(ids)) != len(ids):
                 raise c.Invalid(key + '标识重复')

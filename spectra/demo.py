@@ -86,9 +86,14 @@ def create_demo(width=192, height=144, bands=12, seed=71):
             'synthetic': True,
         })
     region_specs = [
-        {'name': 'Polymer coupon', 'bounds': [int(width * 0.08), int(height * 0.15), int(width * 0.28), int(height * 0.5)], 'color': '#f4b860'},
-        {'name': 'Fiber coupon', 'bounds': [int(width * 0.4), int(height * 0.6), int(width * 0.61), int(height * 0.86)], 'color': '#61d6bc'},
-        {'name': 'Coating coupon', 'bounds': [int(width * 0.75), int(height * 0.2), int(width * 0.92), int(height * 0.55)], 'color': '#9aafff'},
+        {'name': 'Polymer coupon A', 'bounds': [int(width * 0.08), int(height * 0.15), int(width * 0.28), int(height * 0.5)], 'color': '#f4b860', 'training': {'role': 'class', 'name': 'Polymer'}},
+        {'name': 'Polymer coupon B', 'bounds': [int(width * 0.03), int(height * 0.69), int(width * 0.16), int(height * 0.92)], 'color': '#f4b860', 'training': {'role': 'class', 'name': 'Polymer'}},
+        {'name': 'Fiber coupon A', 'bounds': [int(width * 0.4), int(height * 0.6), int(width * 0.61), int(height * 0.86)], 'color': '#61d6bc', 'training': {'role': 'class', 'name': 'Fiber'}},
+        {'name': 'Fiber coupon B', 'bounds': [int(width * 0.39), int(height * 0.07), int(width * 0.6), int(height * 0.28)], 'color': '#61d6bc', 'training': {'role': 'class', 'name': 'Fiber'}},
+        {'name': 'Coating coupon A', 'bounds': [int(width * 0.75), int(height * 0.2), int(width * 0.92), int(height * 0.55)], 'color': '#9aafff', 'training': {'role': 'class', 'name': 'Coating'}},
+        {'name': 'Coating coupon B', 'bounds': [int(width * 0.7), int(height * 0.62), int(width * 0.86), int(height * 0.9)], 'color': '#9aafff', 'training': {'role': 'class', 'name': 'Coating'}},
+        {'name': 'Foreign spot A', 'kind': 'ellipse', 'bounds': [int(width * 0.544), int(height * 0.428), int(width * 0.616), int(height * 0.532)], 'color': '#ff7d7d', 'training': {'role': 'negative'}},
+        {'name': 'Foreign spot B', 'kind': 'ellipse', 'bounds': [int(width * 0.202), int(height * 0.718), int(width * 0.258), int(height * 0.782)], 'color': '#ff7d7d', 'training': {'role': 'negative'}},
     ]
     return cubes, signatures, region_specs
 
@@ -96,13 +101,14 @@ def create_demo(width=192, height=144, bands=12, seed=71):
 def demo_description():
     return {
         'name': '合成材料试片',
-        'description': '三个材料区、两处异物、逐波段缺测块、空间照明渐变及一套错位波段影像；全部为程序合成。',
+        'description': '三个材料区各两块已标记区域、两处异物反例区域、逐波段缺测块、空间照明渐变及一套错位波段影像；全部为程序合成。',
         'default_shape': [144, 192, 12],
         'wavelength_range_nm': [430, 980],
         'roles': ['raw sample', 'dark reference', 'white reference', 'reflectance fixture', 'shifted fixture'],
         'normal_workflows': [
             '选择原始试片，指定暗场和白板进行反射率标定',
             '选择反射率试片，查看分区光谱和材料谱库匹配',
+            '在分类页用已标记区域训练材料分类器，比较两种误判取向后应用到试片',
             '对反射率试片做主成分、聚类与异常图，再分割异常对象',
             '选择错位波段影像，执行平移配准并查看逐带报告',
             '导出工程，重启后重新打开或导入工程副本',

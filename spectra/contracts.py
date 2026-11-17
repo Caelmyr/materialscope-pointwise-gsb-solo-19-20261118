@@ -22,6 +22,7 @@ LIMITS = {
     'assets': 100,
     'regions': 100,
     'signatures': 100,
+    'classifiers': 20,
     'archive_bytes': 120000000,
     'upload_bytes': 100000000,
     'history': 50,
