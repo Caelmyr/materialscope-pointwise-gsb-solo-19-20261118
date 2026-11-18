@@ -6,7 +6,7 @@ import time
 import numpy as np
 
 from . import contracts as c
-from . import diagnostics, library, regions
+from . import diagnostics, library, regions, change, change_demo
 from .demo import create_demo
 from .engine import run_operation, OPERATIONS
 from .io import import_cube, read_signature_csv
@@ -249,6 +249,116 @@ class Services:
                 'maximum_absolute_difference': float(np.abs(delta).max()),
             })
         return {'first': first_asset['name'], 'second': second_asset['name'], 'unit': first.unit, 'bands': reports}
+
+    def _load_change_groups(self, project, before_ids, after_ids):
+        assets = {item['id']: item for item in project['assets']}
+        for label, selected in (('处理前', before_ids), ('处理后', after_ids)):
+            c.array_value(selected, label + '重复影像', 2, 12)
+            if any(identifier not in assets for identifier in selected):
+                raise c.Invalid(label + '重复影像不在当前工程')
+        before_cubes = [self.store.load_cube(assets[i]['digest']) for i in before_ids]
+        after_cubes = [self.store.load_cube(assets[i]['digest']) for i in after_ids]
+        return before_cubes, after_cubes
+
+    def preview_change(self, project_id, before_ids, after_ids, options):
+        project = self.store.get(project_id)
+        before_cubes, after_cubes = self._load_change_groups(project, before_ids, after_ids)
+        return change.preview_change_policies(before_cubes, after_cubes, options)
+
+    def confirm_change(self, project_id, expected_revision, before_ids, after_ids,
+                       policy, options, name):
+        project = self.store.get(project_id)
+        if project['revision'] != c.revision(expected_revision):
+            raise c.Conflict('工程已变化，请刷新后执行')
+        before_cubes, after_cubes = self._load_change_groups(project, before_ids, after_ids)
+        evidence = change.compute_change_evidence(before_cubes, after_cubes, options)
+        cubes, report, protocol = change.classify_change(evidence, policy, options)
+        operations = ['change_magnitude', 'change_decision', 'change_confirmed_mask', 'change_undecided_mask']
+        titles = ['变化幅度', '变化判定标签', '已确认变化掩模', '未决掩模']
+        base_name = c.text(name or '两时点变化分析', '分析名称')
+        rows = []
+        for cube, operation, suffix in zip(cubes, operations, titles):
+            rows.append({
+                'id': c.generated_id('cube'),
+                'name': c.text(f'{base_name} · {suffix}', '结果名称'),
+                'digest': self.store.save_cube(cube),
+                'parent_id': None,
+                'operation': operation,
+                'parameters': {
+                    'before_asset_ids': list(before_ids),
+                    'after_asset_ids': list(after_ids),
+                    'policy': policy,
+                    'options': c.options_copy(options or {}),
+                },
+                'report': report,
+                'summary': cube.summary(),
+                'created_at': c.timestamp(),
+            })
+        record = {
+            'id': c.generated_id('change'),
+            'name': base_name,
+            'created_at': c.timestamp(),
+            'policy': policy,
+            'status': 'confirmed',
+            'before_asset_ids': list(before_ids),
+            'after_asset_ids': list(after_ids),
+            'options': c.options_copy(options or {}),
+            'protocol': c.json_safe(protocol),
+            'report': c.json_safe(report),
+            'magnitude_asset_id': rows[0]['id'],
+            'decision_asset_id': rows[1]['id'],
+            'confirmed_mask_asset_id': rows[2]['id'],
+            'undecided_mask_asset_id': rows[3]['id'],
+        }
+        with self.store.transaction(project_id, expected_revision, '确认两时点变化分析：' + base_name) as current:
+            current['assets'].extend(rows)
+            current.setdefault('change_analyses', []).append(record)
+        return {'project': self.project_summary(project_id), 'change_analysis': record,
+                'assets': rows, 'asset': rows[1]}
+
+    def list_change_analyses(self, project_id):
+        project = self.store.get(project_id)
+        return {'change_analyses': copy.deepcopy(project.get('change_analyses', []))}
+
+    def _change_record(self, project, analysis_id):
+        record = next((item for item in project.get('change_analyses', []) if item['id'] == analysis_id), None)
+        if record is None:
+            raise c.Invalid('变化分析不存在')
+        return record
+
+    def change_evidence_pixel(self, project_id, analysis_id, x, y):
+        project = self.store.get(project_id)
+        record = self._change_record(project, analysis_id)
+        protocol = record['protocol']
+        assets = {item['id']: item for item in project['assets']}
+
+        def cubes_for(ids):
+            return [self.store.load_cube(assets[asset_id]['digest']) for asset_id in ids]
+
+        before_cubes = cubes_for(record['before_asset_ids'])
+        after_cubes = cubes_for(record['after_asset_ids'])
+        return change.pixel_evidence(before_cubes, after_cubes, protocol, x, y)
+
+    def load_change_demo(self, name='两时点变化分析示范'):
+        project = self.store.create(name)
+        bundle = change_demo.create_change_demo()
+        rows = {'before': [], 'after': []}
+        for group, prefix in (('before', '处理前'), ('after', '处理后')):
+            for index, cube in enumerate(bundle[group]):
+                project, row = self.store.append_cube(
+                    project['id'], project['revision'], cube,
+                    f'{prefix}重复 {index + 1}', operation='synthetic_change_demo',
+                    report={'role': group, 'repeat_index': index, 'synthetic': True,
+                            'ground_truth': bundle['ground_truth']})
+                rows[group].append(row)
+        with self.store.transaction(project['id'], project['revision'], '装载变化分析示范说明') as current:
+            current['notes'] = ('程序合成两时点重复采集示范：含局部材料变化、整片轻微变暗、缺测与重复变薄区域；'
+                                '不是现实观测。请在“变化分析”页选择处理前/后重复组并对比两种误报取向。')
+        return {'project': self.project_summary(project['id']),
+                'before_asset_ids': [r['id'] for r in rows['before']],
+                'after_asset_ids': [r['id'] for r in rows['after']],
+                'ground_truth': bundle['ground_truth'],
+                'description': change_demo.change_demo_description()}
 
     def execute_recipe(self, project_id, asset_id, expected_revision, steps, name):
         steps = c.array_value(steps, '配方步骤', 1, 6)

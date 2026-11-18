@@ -136,6 +136,27 @@ def report_bundle(project, asset, cube, options):
     return output.getvalue()
 
 
+def change_decision_rows(record, decision_cube):
+    """变化判定逐像素表，与已固化方案的标签完全一致。"""
+    labels = decision_cube.values[:, :, 0]
+    height, width = labels.shape
+    legend = decision_cube.metadata.get('label_legend', {})
+    policy = record.get('policy')
+    rows = []
+    for y in range(height):
+        for x in range(width):
+            code = int(labels[y, x])
+            rows.append({
+                'x': x,
+                'y': y,
+                'decision_label': code,
+                'decision_meaning': legend.get(str(code), str(code)),
+                'policy': policy,
+                'change_analysis_id': record['id'],
+            })
+    return rows
+
+
 def project_inventory(project):
     rows = []
     for asset in project['assets']:

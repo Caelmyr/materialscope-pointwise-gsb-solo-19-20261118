@@ -11,6 +11,7 @@ from . import acquisition, diagnostics, geometry, library, regions, reports, rep
 from .demo import demo_description
 from .engine import operation_catalog
 from .io import cube_bytes, band_tiff, mask_png, csv_bytes, spectrum_csv, result_bundle
+from .reports import change_decision_rows
 from .jobs import JobManager
 from .preflight import preflight_operation, recipe_preflight
 from .rendering import PreviewCache, render_png, default_view, overlay_regions, band_contact_sheet, compare_preview
@@ -401,6 +402,58 @@ def create_app(data_dir):
         with store.transaction(project_id, data.get('revision'), '汇总重复测量') as project:
             project['assets'].extend(prepared)
         return response({'project': service.project_summary(project_id), 'assets': prepared, 'asset': prepared[0]})
+
+    @app.post('/api/change-demo')
+    def load_change_demo():
+        data = payload()
+        return response(service.load_change_demo(data.get('name', '两时点变化分析示范')))
+
+    @app.get('/api/projects/<project_id>/change-analyses')
+    def list_change_analyses(project_id):
+        return response(service.list_change_analyses(project_id))
+
+    @app.post('/api/projects/<project_id>/change/preview')
+    def change_preview(project_id):
+        data = payload()
+        before_ids = c.array_value(data.get('before_asset_ids'), '处理前重复组', 2, 12)
+        after_ids = c.array_value(data.get('after_asset_ids'), '处理后重复组', 2, 12)
+        return response(service.preview_change(project_id, before_ids, after_ids, data.get('options', {})))
+
+    @app.post('/api/projects/<project_id>/change/confirm')
+    def change_confirm(project_id):
+        data = payload()
+        before_ids = c.array_value(data.get('before_asset_ids'), '处理前重复组', 2, 12)
+        after_ids = c.array_value(data.get('after_asset_ids'), '处理后重复组', 2, 12)
+        policy = c.choice(data.get('policy'), '误报取向', ['formal', 'screening'])
+        return response(service.confirm_change(
+            project_id, data.get('revision'), before_ids, after_ids, policy,
+            data.get('options', {}), data.get('name')))
+
+    @app.get('/api/projects/<project_id>/change-analyses/<analysis_id>/evidence')
+    def change_evidence(project_id, analysis_id):
+        x = request.args.get('x', 0)
+        y = request.args.get('y', 0)
+        return response(service.change_evidence_pixel(project_id, analysis_id, x, y))
+
+    @app.get('/api/projects/<project_id>/change-analyses/<analysis_id>/export/<export_kind>')
+    def change_export(project_id, analysis_id, export_kind):
+        project = store.get(project_id)
+        record = service._change_record(project, analysis_id)
+        kind = c.text(export_kind, '导出类型', 32)
+        asset_id = {
+            'magnitude': record['magnitude_asset_id'],
+            'decision': record['decision_asset_id'],
+            'confirmed': record['confirmed_mask_asset_id'],
+            'undecided': record['undecided_mask_asset_id'],
+        }.get(kind)
+        if asset_id is None:
+            raise c.Invalid('未知变化分析导出类型')
+        _, _, cube = store.asset(project_id, asset_id)
+        if kind == 'magnitude':
+            return binary(cube_bytes(cube), 'change-magnitude.npz', 'application/octet-stream')
+        if kind == 'decision':
+            return binary(csv_bytes(change_decision_rows(record, cube)), 'change-decision-labels.csv', 'text/csv')
+        return binary(mask_png(cube), f'change-{kind}-mask.png', 'image/png')
 
     @app.get('/api/projects/<project_id>/assets/<asset_id>/export/<kind>')
     def export_asset(project_id, asset_id, kind):

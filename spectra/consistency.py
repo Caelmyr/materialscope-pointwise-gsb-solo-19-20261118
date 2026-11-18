@@ -115,6 +115,36 @@ def validate_signature(row):
     return row
 
 
+def validate_change_analysis(row, assets):
+    c.identifier(row.get('id'), '变化分析标识')
+    c.text(row.get('name'), '变化分析名称')
+    c.text(row.get('created_at'), '创建时间', 64)
+    c.choice(row.get('policy'), '误报取向', ['formal', 'screening'])
+    c.text(row.get('status'), '状态', 32)
+    protocol = c.object_value(row.get('protocol'), '变化分析方案')
+    if protocol.get('schema') != 'materialscope_change_protocol_v1':
+        raise c.Invalid('变化分析方案版本不支持')
+    for group in ('before', 'after'):
+        section = c.object_value(protocol.get(group), group + '重复组')
+        fingerprints = c.array_value(section.get('asset_fingerprints'), group + '指纹', 2, 12)
+        for digest in fingerprints:
+            c.text(digest, group + '素材摘要', 64)
+    c.array_value(protocol.get('analysis_band_indices'), '分析波段', 1, 64)
+    # 结果资产必须存在且为本分析派生
+    for key in ('magnitude_asset_id', 'decision_asset_id', 'confirmed_mask_asset_id', 'undecided_mask_asset_id'):
+        asset_id = c.identifier(row.get(key), key)
+        if asset_id not in assets:
+            raise c.Invalid('变化分析引用的结果影像不存在：' + key)
+    # 原始重复影像必须仍在工程内（按资产 ID 核验），保证结论可复算
+    for group in ('before', 'after'):
+        ids = c.array_value(row.get(group + '_asset_ids'), group + '重复资产', 2, 12)
+        for asset_id in ids:
+            if asset_id not in assets:
+                raise c.Invalid('变化分析依赖的原始重复影像已不在工程内，旧结论不可复算')
+    bounded_json(row.get('report', {}), '变化分析报告', 5000000)
+    return row
+
+
 def validate_state(state):
     state = c.object_value(state, '工程状态')
     c.text(state.get('name'), '工程名称')
@@ -129,6 +159,9 @@ def validate_state(state):
     signatures = unique_rows(state.get('signatures'), '材料参考', c.LIMITS['signatures'])
     for row in signatures:
         validate_signature(row)
+    change_rows = unique_rows(state.get('change_analyses', []), '变化分析', c.LIMITS.get('change_analyses', 50))
+    for row in change_rows:
+        validate_change_analysis(row, lookup)
     return state
 
 
